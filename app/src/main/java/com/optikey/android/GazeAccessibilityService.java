@@ -74,7 +74,7 @@ public class GazeAccessibilityService extends AccessibilityService implements Li
     private final List<Rect> clickableTargets = new ArrayList<>();
     private Rect snappedRect = null;
 
-    private final RectF[] dockRects = new RectF;
+    private final List<RectF> dockRects = new ArrayList<>();
     private final String[] dockLabels = {"PAUSA", "INDIETRO", "HOME", "CALIBRA"};
     private int hoveredDockIdx = -1;
 
@@ -144,7 +144,7 @@ public class GazeAccessibilityService extends AccessibilityService implements Li
         float startY = (sh - (dockH * 4 + 30)) / 2f;
         for (int i = 0; i < 4; i++) {
             float top = startY + i * (dockH + 10);
-            dockRects[i] = new RectF(sw - dockW - 8, top, sw - 8, top + dockH);
+            dockRects.add(new RectF(sw - dockW - 8, top, sw - 8, top + dockH);
         }
 
         double[] mx = {0.08, 0.29, 0.50, 0.71, 0.92};
