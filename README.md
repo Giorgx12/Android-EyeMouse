@@ -10,6 +10,6 @@ Hands-free eye-tracking mouse and accessibility controller for Android, powered 
 * **Gaze Quick-Action Dock:** Side overlay with hands-free controls for **Pause/Resume**, **Back**, **Home**, and **Recalibrate**.
 
 ## 📥 Download & Test
-1. Go to the **[Releases tab](https://github.com/Giorgx12/Android-EyeMouse/releases)**) and download the latest `OptiKeyAndroid-APK` build.
+1. Go to the **[Releases tab](https://github.com/Giorgx12/Android-EyeMouse/releases)** and download the latest `OptiKeyAndroid-APK` build.
 2. Install `app-debug.apk` on your Android device.
 3. Grant **Camera** permission and enable **OptiKey Gaze** in *Settings → Accessibility*.
