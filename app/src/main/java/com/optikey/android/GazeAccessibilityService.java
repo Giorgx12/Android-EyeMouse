@@ -10,6 +10,7 @@ import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.PixelFormat;
+import android.graphics.Rect;
 import android.graphics.RectF;
 import android.os.Handler;
 import android.os.Looper;
@@ -18,6 +19,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityNodeInfo;
 
 import androidx.annotation.NonNull;
 import androidx.camera.core.CameraSelector;
@@ -39,6 +41,7 @@ import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarker;
 import com.google.mediapipe.tasks.vision.facelandmarker.FaceLandmarkerResult;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -46,6 +49,9 @@ import java.util.concurrent.Executors;
 public class GazeAccessibilityService extends AccessibilityService implements LifecycleOwner {
 
     public static GazeAccessibilityService instance = null;
+    public int dwellDurationMs = 2000;
+    public boolean snapEnabled = true;
+
     private LifecycleRegistry lifecycleRegistry;
     private WindowManager windowManager;
     private GazeOverlayView overlayView;
@@ -56,15 +62,21 @@ public class GazeAccessibilityService extends AccessibilityService implements Li
     private static final int CAL_PTS = 15;
     private int calStep = 0;
     private float calProg = 0f, dwellProg = 0f;
-    private boolean faceOk = false, initEye = false;
-    private double rawSmX = 0, rawSmY = 0, smX = 500, smY = 500, anchorX = 500, anchorY = 500;
-    private long calTimer = 0, dwellTimer = 0, lastActionTime = 0, lastScrollTime = 0;
+    private boolean faceOk = false, initEye = false, isPaused = false, isSnapped = false;
+    private double rawSmX = 0, rawSmY = 0, smX = 500, smY = 500, cursorX = 500, cursorY = 500, anchorX = 500, anchorY = 500;
+    private long calTimer = 0, dwellTimer = 0, lastActionTime = 0, lastScrollTime = 0, lastNodeScanTime = 0;
 
     private final List<double[]> calTargets = new ArrayList<>();
     private final List<double[]> calEye = new ArrayList<>();
     private final List<double[]> stepSamples = new ArrayList<>();
     private final List<Double> calX = new ArrayList<>();
     private final List<Double> calY = new ArrayList<>();
+    private final List<Rect> clickableTargets = new ArrayList<>();
+    private Rect snappedRect = null;
+
+    private final RectF[] dockRects = new RectF;
+    private final String[] dockLabels = {"PAUSA", "INDIETRO", "HOME", "CALIBRA"};
+    private int hoveredDockIdx = -1;
 
     static class LinearGaze {
         double ax = 0, bx = 0, cx = 0, ay = 0, by = 0, cy = 0;
@@ -76,7 +88,7 @@ public class GazeAccessibilityService extends AccessibilityService implements Li
             double sX = 0, sY = 0, sXX = 0, sYY = 0, sXY = 0, s1 = n;
             double bX0 = 0, bX1 = 0, bX2 = 0, bY0 = 0, bY1 = 0, bY2 = 0;
             for (int i = 0; i < n; i++) {
-                double x = e.get(i)[0], y = e.get(i)[1];
+                double x = e.get(i), y = e.get(i);
                 sX += x; sY += y; sXX += x * x; sYY += y * y; sXY += x * y;
                 bX0 += sx.get(i); bX1 += x * sx.get(i); bX2 += y * sx.get(i);
                 bY0 += sy.get(i); bY1 += x * sy.get(i); bY2 += y * sy.get(i);
@@ -85,8 +97,8 @@ public class GazeAccessibilityService extends AccessibilityService implements Li
             double[] rx = solve3(s1, sX, sY, sXX, sXY, sYY, bX0, bX1, bX2);
             double[] ry = solve3(s1, sX, sY, sXX, sXY, sYY, bY0, bY1, bY2);
             if (rx != null && ry != null) {
-                cx = rx[0]; ax = rx[1]; bx = rx[2];
-                cy = ry[0]; ay = ry[1]; by = ry[2];
+                cx = rx; ax = rx; bx = rx;
+                cy = ry; ay = ry; by = ry;
                 ready = true;
             }
         }
@@ -106,13 +118,16 @@ public class GazeAccessibilityService extends AccessibilityService implements Li
     }
 
     private final LinearGaze mapper = new LinearGaze();
-
-    @Override
+        @Override
     public void onServiceConnected() {
         super.onServiceConnected();
         instance = this;
         lifecycleRegistry = new LifecycleRegistry(this);
         lifecycleRegistry.setCurrentState(Lifecycle.State.CREATED);
+
+        SharedPreferences sp = getSharedPreferences("optikey_cal", MODE_PRIVATE);
+        dwellDurationMs = sp.getInt("dwell_ms", 2000);
+        snapEnabled = sp.getBoolean("snap_enabled", true);
 
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
         DisplayMetrics dm = new DisplayMetrics();
@@ -121,6 +136,16 @@ public class GazeAccessibilityService extends AccessibilityService implements Li
         sh = dm.heightPixels;
         smX = sw * 0.5;
         smY = sh * 0.5;
+        cursorX = smX;
+        cursorY = smY;
+
+        float dockW = 145f;
+        float dockH = 125f;
+        float startY = (sh - (dockH * 4 + 30)) / 2f;
+        for (int i = 0; i < 4; i++) {
+            float top = startY + i * (dockH + 10);
+            dockRects[i] = new RectF(sw - dockW - 8, top, sw - 8, top + dockH);
+        }
 
         double[] mx = {0.08, 0.29, 0.50, 0.71, 0.92};
         double[] my = {0.08, 0.50, 0.92};
@@ -151,6 +176,7 @@ public class GazeAccessibilityService extends AccessibilityService implements Li
     }
 
     public void startCalibration() {
+        isPaused = false;
         calStep = 0;
         initEye = false;
         calEye.clear();
@@ -224,6 +250,39 @@ public class GazeAccessibilityService extends AccessibilityService implements Li
         }, ContextCompat.getMainExecutor(this));
     }
 
+    private void refreshClickableNodes() {
+        clickableTargets.clear();
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null) return;
+        collectClickableNodes(root);
+        root.recycle();
+    }
+
+    private void collectClickableNodes(AccessibilityNodeInfo node) {
+        if (node == null) return;
+        if (node.isVisibleToUser() && node.isClickable()) {
+            Rect r = new Rect();
+            node.getBoundsInScreen(r);
+            if (r.width() > 20 && r.height() > 20 && r.width() < sw * 0.85 && r.height() < sh * 0.5) {
+                clickableTargets.add(r);
+            }
+        }
+        for (int i = 0; i < node.getChildCount(); i++) {
+            AccessibilityNodeInfo child = node.getChild(i);
+            if (child != null) {
+                collectClickableNodes(child);
+                child.recycle();
+            }
+        }
+    }
+
+    private double getMedian(List<Double> vals) {
+        if (vals.isEmpty()) return 0;
+        Collections.sort(vals);
+        int mid = vals.size() / 2;
+        if (vals.size() % 2 == 0) return (vals.get(mid - 1) + vals.get(mid)) / 2.0;
+        return vals.get(mid);
+    }
     private void processFrame(@NonNull ImageProxy image) {
         if (faceLandmarker == null) {
             image.close();
@@ -275,19 +334,20 @@ public class GazeAccessibilityService extends AccessibilityService implements Li
                     long dt = now - calTimer;
                     if (dt < 900) {
                         calProg = 0f;
-                    } else if (dt < 1800) {
-                        calProg = (dt - 900) / 900f;
+                    } else if (dt < 2000) {
+                        calProg = (dt - 900) / 1100f;
                         stepSamples.add(new double[]{rawSmX, rawSmY});
                     } else {
                         if (!stepSamples.isEmpty()) {
-                            double sx = 0, sy = 0;
+                            List<Double> xs = new ArrayList<>(), ys = new ArrayList<>();
                             for (double[] p : stepSamples) {
-                                sx += p[0];
-                                sy += p[1];
+                                xs.add(java.lang.reflect.Array.getDouble(p, 0));
+                                ys.add(java.lang.reflect.Array.getDouble(p, 1));
                             }
-                            calEye.add(new double[]{sx / stepSamples.size(), sy / stepSamples.size()});
-                            calX.add(calTargets.get(calStep)[0]);
-                            calY.add(calTargets.get(calStep)[1]);
+                            calEye.add(new double[]{getMedian(xs), getMedian(ys)});
+                            double[] target = calTargets.get(calStep);
+                            calX.add(java.lang.reflect.Array.getDouble(target, 0));
+                            calY.add(java.lang.reflect.Array.getDouble(target, 1));
                             stepSamples.clear();
                             calStep++;
                             calProg = 0f;
@@ -298,37 +358,100 @@ public class GazeAccessibilityService extends AccessibilityService implements Li
                         }
                         calTimer = now;
                     }
+                    
                 } else if (mapper.ready) {
                     double[] pred = mapper.predict(rawSmX, rawSmY);
-                    double tx = Math.max(0.0, Math.min(sw - 1, pred[0]));
-                    double ty = Math.max(0.0, Math.min(sh - 1, pred[1]));
-                    smX += (tx - smX) * 0.20;
-                    smY += (ty - smY) * 0.20;
+                    double px = java.lang.reflect.Array.getDouble(pred, 0);
+                    double py = java.lang.reflect.Array.getDouble(pred, 1);
+                    double tx = Math.max(0.0, Math.min(sw - 1, px));
+                    double ty = Math.max(0.0, Math.min(sh - 1, py));
 
-                    if (now - lastScrollTime > 800) {
-                        if (smY < 80) {
+                    double dist = Math.hypot(tx - smX, ty - smY);
+                    double alpha = Math.min(0.45, Math.max(0.10, dist / 600.0));
+                    smX += (tx - smX) * alpha;
+                    smY += (ty - smY) * alpha;
+
+                    hoveredDockIdx = -1;
+                    for (int i = 0; i < 4; i++) {
+                        RectF dr = dockRects.get(i);
+                        if (dr.contains((float) smX, (float) smY)) {
+                            hoveredDockIdx = i;
+                            break;
+                        }
+                    }
+
+                    isSnapped = false;
+                    snappedRect = null;
+                    cursorX = smX;
+                    cursorY = smY;
+
+                    if (hoveredDockIdx != -1) {
+                        RectF dr = dockRects.get(hoveredDockIdx);
+                        cursorX = dr.centerX();
+                        cursorY = dr.centerY();
+                    } else if (!isPaused && snapEnabled) {
+                        if (now - lastNodeScanTime > 450) {
+                            refreshClickableNodes();
+                            lastNodeScanTime = now;
+                        }
+                        double bestDist = 135.0;
+                        Rect bestRect = null;
+                        for (Rect r : clickableTargets) {
+                            double d = Math.hypot(smX - r.centerX(), smY - r.centerY());
+                            if (d < bestDist) {
+                                bestDist = d;
+                                bestRect = r;
+                            }
+                        }
+                        if (bestRect != null) {
+                            cursorX = bestRect.centerX();
+                            cursorY = bestRect.centerY();
+                            isSnapped = true;
+                            snappedRect = bestRect;
+                        }
+                    }
+
+                    if (!isPaused && hoveredDockIdx == -1 && (now - lastScrollTime > 1000)) {
+                        if (smY < 75) {
                             performSwipe(sw / 2f, sh * 0.3f, sw / 2f, sh * 0.7f);
                             lastScrollTime = now;
-                        } else if (smY > sh - 80) {
+                        } else if (smY > sh - 75) {
                             performSwipe(sw / 2f, sh * 0.7f, sw / 2f, sh * 0.3f);
                             lastScrollTime = now;
                         }
                     }
 
-                    if (Math.hypot(smX - anchorX, smY - anchorY) > 55.0) {
-                        anchorX = smX;
-                        anchorY = smY;
-                        dwellTimer = now;
-                        dwellProg = 0f;
-                    } else {
-                        long elapsed = now - dwellTimer;
-                        dwellProg = Math.min(1f, elapsed / 1000f);
-                        if (elapsed >= 1000 && (now - lastActionTime > 1400)) {
-                            lastActionTime = now;
+                    boolean canDwell = (!isPaused || hoveredDockIdx == 0 || hoveredDockIdx == 3);
+                    if (canDwell) {
+                        double snapRadius = isSnapped ? 110.0 : 80.0;
+                        if (Math.hypot(cursorX - anchorX, cursorY - anchorY) > snapRadius) {
+                            anchorX = cursorX;
+                            anchorY = cursorY;
                             dwellTimer = now;
                             dwellProg = 0f;
-                            performTap((float) smX, (float) smY);
+                        } else {
+                            long elapsed = now - dwellTimer;
+                            dwellProg = Math.min(1f, (float) elapsed / dwellDurationMs);
+                            if (elapsed >= dwellDurationMs && (now - lastActionTime > 1500)) {
+                                lastActionTime = now;
+                                dwellTimer = now;
+                                dwellProg = 0f;
+
+                                if (hoveredDockIdx == 0) {
+                                    isPaused = !isPaused;
+                                } else if (hoveredDockIdx == 1) {
+                                    performGlobalAction(GLOBAL_ACTION_BACK);
+                                } else if (hoveredDockIdx == 2) {
+                                    performGlobalAction(GLOBAL_ACTION_HOME);
+                                } else if (hoveredDockIdx == 3) {
+                                    startCalibration();
+                                } else if (!isPaused) {
+                                    performTap((float) cursorX, (float) cursorY);
+                                }
+                            }
                         }
+                    } else {
+                        dwellProg = 0f;
                     }
                 }
             } else {
@@ -339,7 +462,6 @@ public class GazeAccessibilityService extends AccessibilityService implements Li
             image.close();
         }
     }
-
     private void performTap(float x, float y) {
         new Handler(Looper.getMainLooper()).post(() -> {
             Path path = new Path();
@@ -372,7 +494,8 @@ public class GazeAccessibilityService extends AccessibilityService implements Li
         protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
             if (calStep < CAL_PTS) {
-                canvas.drawColor(Color.argb(210, 12, 14, 20));
+                canvas.drawColor(Color.argb(215, 12, 14, 20));
+                paint.setStyle(Paint.Style.FILL);
                 paint.setColor(Color.WHITE);
                 paint.setTextSize(42f);
                 paint.setTextAlign(Paint.Align.CENTER);
@@ -380,10 +503,10 @@ public class GazeAccessibilityService extends AccessibilityService implements Li
                         : "CALIBRAZIONE " + (calStep + 1) + "/15 • Fissa il bersaglio rosso";
                 canvas.drawText(msg, sw / 2f, 140f, paint);
 
-                float tx = (float) calTargets.get(calStep)[0];
-                float ty = (float) calTargets.get(calStep)[1];
+                double[] target = calTargets.get(calStep);
+                float tx = (float) java.lang.reflect.Array.getDouble(target, 0);
+                float ty = (float) java.lang.reflect.Array.getDouble(target, 1);
 
-                paint.setStyle(Paint.Style.FILL);
                 paint.setColor(Color.rgb(244, 63, 94));
                 canvas.drawCircle(tx, ty, 34f, paint);
 
@@ -396,14 +519,50 @@ public class GazeAccessibilityService extends AccessibilityService implements Li
                 paint.setColor(Color.WHITE);
                 canvas.drawCircle(tx, ty, 8f, paint);
             } else {
+                paint.setTextAlign(Paint.Align.CENTER);
+                paint.setTextSize(26f);
+                for (int i = 0; i < 4; i++) {
+                    RectF dr = dockRects.get(i);
+                    paint.setStyle(Paint.Style.FILL);
+                    if (i == 0 && isPaused) {
+                        paint.setColor(Color.argb(210, 245, 158, 11));
+                    } else if (hoveredDockIdx == i) {
+                        paint.setColor(Color.argb(210, 14, 165, 233));
+                    } else {
+                        paint.setColor(Color.argb(150, 24, 28, 38));
+                    }
+                    canvas.drawRoundRect(dr, 20f, 20f, paint);
+
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setStrokeWidth(3f);
+                    paint.setColor(Color.argb(180, 255, 255, 255));
+                    canvas.drawRoundRect(dr, 20f, 20f, paint);
+
+                    paint.setStyle(Paint.Style.FILL);
+                    paint.setColor(Color.WHITE);
+                    String lbl = (i == 0 && isPaused) ? "RIPRENDI" : (String) java.lang.reflect.Array.get(dockLabels, i);
+                    canvas.drawText(lbl, dr.centerX(), dr.centerY() + 9f, paint);
+                }
+
+                if (isSnapped && snappedRect != null) {
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setStrokeWidth(5f);
+                    paint.setColor(Color.argb(190, 250, 204, 21));
+                    canvas.drawRoundRect(new RectF(snappedRect), 18f, 18f, paint);
+                }
+
                 paint.setStyle(Paint.Style.STROKE);
-                paint.setStrokeWidth(6f);
-                paint.setColor(faceOk ? Color.rgb(56, 189, 248) : Color.RED);
-                canvas.drawCircle((float) smX, (float) smY, 28f, paint);
+                paint.setStrokeWidth(7f);
+                if (!faceOk) paint.setColor(Color.RED);
+                else if (isPaused) paint.setColor(Color.rgb(245, 158, 11));
+                else if (isSnapped) paint.setColor(Color.rgb(250, 204, 21));
+                else paint.setColor(Color.rgb(56, 189, 248));
+
+                canvas.drawCircle((float) cursorX, (float) cursorY, 28f, paint);
 
                 if (dwellProg > 0.05f) {
                     paint.setColor(Color.rgb(52, 211, 153));
-                    canvas.drawArc(new RectF((float) smX - 36f, (float) smY - 36f, (float) smX + 36f, (float) smY + 36f),
+                    canvas.drawArc(new RectF((float) cursorX - 38f, (float) cursorY - 38f, (float) cursorX + 38f, (float) cursorY + 38f),
                             -90f, 360f * dwellProg, false, paint);
                 }
             }
