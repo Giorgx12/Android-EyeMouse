@@ -88,7 +88,8 @@ public class GazeAccessibilityService extends AccessibilityService implements Li
             double sX = 0, sY = 0, sXX = 0, sYY = 0, sXY = 0, s1 = n;
             double bX0 = 0, bX1 = 0, bX2 = 0, bY0 = 0, bY1 = 0, bY2 = 0;
             for (int i = 0; i < n; i++) {
-                double x = e.get(i), y = e.get(i);
+                double x = java.lang.reflect.Array.getDouble(e.get(i), 0);
+                double y = java.lang.reflect.Array.getDouble(e.get(i), 1);  
                 sX += x; sY += y; sXX += x * x; sYY += y * y; sXY += x * y;
                 bX0 += sx.get(i); bX1 += x * sx.get(i); bX2 += y * sx.get(i);
                 bY0 += sy.get(i); bY1 += x * sy.get(i); bY2 += y * sy.get(i);
@@ -97,8 +98,12 @@ public class GazeAccessibilityService extends AccessibilityService implements Li
             double[] rx = solve3(s1, sX, sY, sXX, sXY, sYY, bX0, bX1, bX2);
             double[] ry = solve3(s1, sX, sY, sXX, sXY, sYY, bY0, bY1, bY2);
             if (rx != null && ry != null) {
-                cx = rx; ax = rx; bx = rx;
-                cy = ry; ay = ry; by = ry;
+                cx = java.lang.reflect.Array.getDouble(rx, 0);
+                ax = java.lang.reflect.Array.getDouble(rx, 1);
+                bx = java.lang.reflect.Array.getDouble(rx, 2);
+                cy = java.lang.reflect.Array.getDouble(ry, 0);
+                ay = java.lang.reflect.Array.getDouble(ry, 1);
+                by = java.lang.reflect.Array.getDouble(ry, 2); 
                 ready = true;
             }
         }
