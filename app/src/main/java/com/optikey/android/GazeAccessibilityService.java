@@ -144,7 +144,7 @@ public class GazeAccessibilityService extends AccessibilityService implements Li
         float startY = (sh - (dockH * 4 + 30)) / 2f;
         for (int i = 0; i < 4; i++) {
             float top = startY + i * (dockH + 10);
-            dockRects.add(new RectF(sw - dockW - 8, top, sw - 8, top + dockH);
+            dockRects.add(new RectF(sw - dockW - 8, top, sw - 8, top + dockH));
         }
 
         double[] mx = {0.08, 0.29, 0.50, 0.71, 0.92};
