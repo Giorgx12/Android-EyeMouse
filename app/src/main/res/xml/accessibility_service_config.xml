@@ -5,5 +5,5 @@
     android:accessibilityFlags="flagDefault"
     android:canPerformGestures="true"
     android:canRetrieveWindowContent="true"
-    android:description="@string/app_name"
+    android:description="OptiKey Gaze"
     android:notificationTimeout="50" />
